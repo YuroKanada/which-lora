@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Training artifacts
+checkpoints/
+saved_models/
+wandb/
+
+# Dataset
+dataset/
+
+# Evaluation notebooks
+evaluate_image_lora_retrieval.ipynb
+evaluate_mixed_lora_detection.ipynb
