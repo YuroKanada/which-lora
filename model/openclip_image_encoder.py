@@ -39,8 +39,14 @@ class OpenClipImageEncoder(nn.Module):
         image_tensor = torch.stack(images, dim=0).to(next(self.clip.parameters()).device)
         return self.clip.encode_image(image_tensor)
 
-    def forward(self, image_paths: List[str]) -> torch.Tensor:
-        return self.encode_raw(image_paths)
+    def encode_tensor(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        image_tensor = image_tensor.to(next(self.clip.parameters()).device, non_blocking=True)
+        return self.clip.encode_image(image_tensor)
+
+    def forward(self, image_inputs: Union[List[str], torch.Tensor]) -> torch.Tensor:
+        if isinstance(image_inputs, torch.Tensor):
+            return self.encode_tensor(image_inputs)
+        return self.encode_raw(image_inputs)
 
     def _visual_params(self):
         params = []
