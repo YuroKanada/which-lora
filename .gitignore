@@ -21,6 +21,10 @@
 !/train/**
 !/utils/**
 
+# These top-level paths stay ignored and should not be tracked.
+/analyze_mixed_lora_hypothesis.ipynb
+/generated_sd15_clip_baseline_artist95/
+
 # Still ignore common Python and Jupyter cache files anywhere.
 __pycache__/
 *.pyc
