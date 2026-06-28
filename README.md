@@ -1,6 +1,7 @@
-# Retrieval of LoRA Models based on Layer-Wise Weight Embedding without Metadata
+# Retrieving LoRAs Trained on a Query Image via Internal LoRA Parameters
 
-This repository implements a framework for learning embedding representations of LoRA models directly from their adapter weights, without relying on textual metadata. The learned representations are aligned with image features so that each LoRA can be retrieved from example images and analyzed in a shared embedding space.
+This repository implements a framework for learning embedding representations of LoRA models directly from their adapter weights, without relying on textual metadata. 
+The learned representations are aligned with image features so that each LoRA can be retrieved from example images and analyzed in a shared embedding space.
 
 The current codebase supports training with image-LoRA pairs, evaluation on base-LoRA retrieval, and mixed-LoRA relation learning.
 
