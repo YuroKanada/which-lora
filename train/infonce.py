@@ -18,7 +18,10 @@ class InfoNCELoss(nn.Module):
         self.temperature = float(temperature)
         self.symmetric = bool(symmetric)
 
-    def _build_positive_mask(self, batch_size: int, device, labels=None) -> torch.Tensor:
+    def _build_positive_mask(self, batch_size: int, device, labels=None, positive_mask=None) -> torch.Tensor:
+        if positive_mask is not None:
+            return positive_mask.to(device=device, dtype=torch.bool)
+
         if labels is None:
             return torch.eye(batch_size, device=device, dtype=torch.bool)
 
@@ -39,9 +42,14 @@ class InfoNCELoss(nn.Module):
         positive_log_probs = (log_probs * positive_mask.float()).sum(dim=1) / positive_counts.clamp_min(1).float()
         return -positive_log_probs[valid_rows].mean()
 
-    def forward(self, z_text: torch.Tensor, z_lora: torch.Tensor, labels=None) -> torch.Tensor:
+    def forward(self, z_text: torch.Tensor, z_lora: torch.Tensor, labels=None, positive_mask=None) -> torch.Tensor:
         logits = (z_text @ z_lora.t()) / self.temperature
-        positive_mask = self._build_positive_mask(logits.size(0), logits.device, labels=labels)
+        positive_mask = self._build_positive_mask(
+            logits.size(0),
+            logits.device,
+            labels=labels,
+            positive_mask=positive_mask,
+        )
 
         loss_t2l = self._multi_positive_loss(logits, positive_mask)
         if not self.symmetric:

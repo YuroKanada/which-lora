@@ -105,6 +105,77 @@ class MonotonicMixRatioLoss(nn.Module):
         return torch.stack(losses).mean()
 
 
+class MixRatioGeometryConsistencyLoss(nn.Module):
+    """
+    Encourage mixed LoRAs with larger donor ratio alpha to move
+    monotonically toward the donor side within the parent-pair subspace.
+
+    For each mixed embedding, define a donor-side score:
+
+        score = sim(z_mixed, z_donor) - sim(z_mixed, z_target)
+
+    Then, for mixed LoRAs that share the same parent pair, require
+    larger alpha to imply a larger donor-side score.
+
+    This is a safer geometry-oriented alternative to direct linear
+    interpolation matching, because it only enforces ordering, not
+    exact location on the line segment between parent embeddings.
+    """
+
+    def __init__(self, margin: float = 0.0, min_alpha_gap: float = 1e-6):
+        super().__init__()
+        self.margin = float(margin)
+        self.min_alpha_gap = float(min_alpha_gap)
+
+    def forward(
+        self,
+        z_mixed: torch.Tensor,
+        z_target: torch.Tensor,
+        z_donor: torch.Tensor,
+        alpha: torch.Tensor,
+        pair_ids,
+    ) -> torch.Tensor:
+        if z_mixed.size(0) == 0:
+            return z_mixed.new_zeros(())
+
+        alpha = alpha.view(-1)
+        pair_ids = [str(x) for x in pair_ids]
+
+        donor_sims = F.cosine_similarity(z_mixed, z_donor, dim=-1)
+        target_sims = F.cosine_similarity(z_mixed, z_target, dim=-1)
+        donor_side_scores = donor_sims - target_sims
+
+        losses = []
+        num_items = z_mixed.size(0)
+
+        for i in range(num_items):
+            for j in range(i + 1, num_items):
+                if pair_ids[i] != pair_ids[j]:
+                    continue
+
+                alpha_gap = torch.abs(alpha[i] - alpha[j]).item()
+                if alpha_gap < self.min_alpha_gap:
+                    continue
+
+                if alpha[i] < alpha[j]:
+                    low_idx, high_idx = i, j
+                else:
+                    low_idx, high_idx = j, i
+
+                losses.append(
+                    F.relu(
+                        self.margin
+                        - donor_side_scores[high_idx]
+                        + donor_side_scores[low_idx]
+                    )
+                )
+
+        if not losses:
+            return z_mixed.new_zeros(())
+
+        return torch.stack(losses).mean()
+
+
 class MixedAwareRankingLoss(nn.Module):
     """
     Ranking loss for mixed retrieval where only related mixed LoRAs

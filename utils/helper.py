@@ -38,6 +38,10 @@ def save_weights_best_only(
     image_proj,
     lora_enc,
     lora_proj,
+    save_lora_proj: bool = True,
+    lora_encoder_mode: str = "full",
+    lora_aggregator_type: str = "mlp",
+    model_config_snapshot: dict | None = None,
 ):
     if not is_best:
         return
@@ -47,9 +51,22 @@ def save_weights_best_only(
     torch.save(image_enc.state_dict(), os.path.join(out_dir, "image_enc.pt"))
     torch.save(image_proj.state_dict(), os.path.join(out_dir, "image_proj.pt"))
     torch.save(lora_enc.state_dict(), os.path.join(out_dir, "lora_enc.pt"))
-    torch.save(lora_proj.state_dict(), os.path.join(out_dir, "lora_proj.pt"))
+    if save_lora_proj:
+        torch.save(lora_proj.state_dict(), os.path.join(out_dir, "lora_proj.pt"))
 
     with open(os.path.join(out_dir, "best_meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"epoch": int(epoch), "train_loss": float(avg_loss)}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "epoch": int(epoch),
+                "train_loss": float(avg_loss),
+                "use_lora_proj": bool(save_lora_proj),
+                "lora_encoder_mode": str(lora_encoder_mode),
+                "lora_aggregator_type": str(lora_aggregator_type),
+                "model_config": model_config_snapshot or {},
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     print(f"[OK] saved best weights -> {out_dir} (epoch={epoch}, loss={avg_loss:.6f})")

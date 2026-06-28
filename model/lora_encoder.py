@@ -10,6 +10,6 @@ class LoraEncoder(nn.Module):
         self.normalize = normalize
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.encoder(x)        # [B, T, D]
+        h = self.encoder(x) if self.encoder is not None else x  # [B, T, D]
         z = self.aggregator(h)     # [B, D]
         return F.normalize(z, p=2, dim=-1) if self.normalize else z

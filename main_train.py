@@ -9,6 +9,7 @@ from itertools import cycle
 
 import wandb
 import torch
+import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -24,7 +25,7 @@ from model.lora_encoder import LoraEncoder
 from model.transformer_encoder import TransformerEncoder
 from train.infonce import InfoNCELoss
 from train.ranking import MarginRankingTopKLoss
-from train.mixed_losses import MixedAwareRankingLoss
+from train.mixed_losses import MixedAwareRankingLoss, MixRatioGeometryConsistencyLoss
 from utils.helper import (
     grad_norm,
     load_pretrained,
@@ -40,6 +41,66 @@ LORA_ID_KEY = "lora_id"
 VALIDATION_BATCH_SIZE = CONFIG.get("validation_batch_size", CONFIG["batch_size"])
 EVAL100_TOP_KS = (1, 5, 10)
 MIXED_EVAL_TOP_KS = (5, 10, 20)
+MODEL_CONFIG_KEYS = (
+    "dimension",
+    "num_layers",
+    "num_heads",
+    "ff_dim",
+    "image_encoder_type",
+    "image_encoder_model_name",
+    "image_encoder_pretrained",
+    "image_proj_type",
+    "image_proj_hidden_dim",
+    "image_proj_dropout",
+    "use_lora_proj",
+    "lora_proj_type",
+    "lora_proj_hidden_dim",
+    "lora_proj_dropout",
+    "lora_encoder_mode",
+    "lora_aggregator_type",
+    "lora_aggregator_hidden_dim",
+)
+
+
+class _NoOpWandbConfig:
+    def update(self, *args, **kwargs):
+        return None
+
+
+class _NoOpWandbRun:
+    def __init__(self):
+        self.config = _NoOpWandbConfig()
+
+    def log(self, *args, **kwargs):
+        return None
+
+    def finish(self):
+        return None
+
+
+def init_wandb(config, timestamp):
+    if not config.get("wandb_enabled", True):
+        os.environ["WANDB_MODE"] = "disabled"
+        print("[INFO] W&B disabled by config.")
+        return _NoOpWandbRun()
+
+    if config.get("wandb_api_key"):
+        os.environ["WANDB_API_KEY"] = config["wandb_api_key"]
+
+    wandb_mode = config.get("wandb_mode", "online")
+    os.environ["WANDB_MODE"] = wandb_mode
+
+    try:
+        return wandb.init(
+            project=config.get("wandb_project", "image_lora_retrieval"),
+            name=f"{config.get('wandb_run_name_prefix', 'run')}_{timestamp}",
+            config=config,
+            mode=wandb_mode,
+        )
+    except Exception as exc:
+        print(f"[WARN] W&B init failed, continuing without W&B logging: {exc}")
+        os.environ["WANDB_MODE"] = "disabled"
+        return _NoOpWandbRun()
 
 
 def canonicalize_lora_id(lora_id: str) -> str:
@@ -95,6 +156,45 @@ def load_base_artist_groups(plan_csv_path):
         for artist, lora_ids in artist_to_base_lora_ids.items()
     }
     return base_lora_to_artist, artist_to_base_lora_ids
+
+
+def load_mixed_train_geometry_metadata(plan_csv_path, mixed_lora_ids):
+    target_base_ids = []
+    donor_base_ids = []
+    donor_ratios = []
+    pair_ids = []
+
+    wanted_ids = {canonicalize_lora_id(lora_id) for lora_id in mixed_lora_ids}
+    row_by_mixed_id = {}
+    with open(plan_csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            mixed_id = canonicalize_lora_id(str(row["lora_id"]))
+            if mixed_id in wanted_ids:
+                row_by_mixed_id[mixed_id] = row
+
+    missing = [lora_id for lora_id in mixed_lora_ids if canonicalize_lora_id(lora_id) not in row_by_mixed_id]
+    if missing:
+        raise KeyError(f"Missing mixed plan rows for mixed lora ids: {missing[:5]}")
+
+    for lora_id in mixed_lora_ids:
+        row = row_by_mixed_id[canonicalize_lora_id(lora_id)]
+        target_base_id = canonicalize_lora_id(str(row["target_base_lora_id"]))
+        donor_base_id = canonicalize_lora_id(str(row["donor_base_lora_id"]))
+        donor_ratio = float(row["donor_ratio_actual"])
+        pair_id = f"{target_base_id}__{donor_base_id}"
+
+        target_base_ids.append(target_base_id)
+        donor_base_ids.append(donor_base_id)
+        donor_ratios.append(donor_ratio)
+        pair_ids.append(pair_id)
+
+    return {
+        "target_base_ids": target_base_ids,
+        "donor_base_ids": donor_base_ids,
+        "donor_ratios": donor_ratios,
+        "pair_ids": pair_ids,
+    }
 
 
 def resolve_image_path_value(image_path_value, image_root_dir=None, path_replacements=None):
@@ -424,14 +524,7 @@ def evaluate_validation_retrieval(
         metrics[f"validation_artist_hit@{k}"] = hits[k] / num_rows
     return metrics
 
-if CONFIG.get("wandb_api_key"):
-    os.environ["WANDB_API_KEY"] = CONFIG["wandb_api_key"]
-
-wandb.init(
-    project=CONFIG.get("wandb_project", "image_lora_retrieval"),
-    name=f"{CONFIG.get('wandb_run_name_prefix', 'run')}_{timestamp}",
-    config=CONFIG,
-)
+wandb_run = init_wandb(CONFIG, timestamp)
 print("[DEBUG] start main, epochs =", CONFIG["epochs"])
 
 train_model_matrix_dict = load_model_matrix(
@@ -466,7 +559,12 @@ train_ds = ImageLoRAPairsDataset(
     lora_id_key=LORA_ID_KEY,
     image_root_dir=CONFIG.get("image_root_dir"),
     path_replacements=CONFIG.get("image_path_replacements"),
+    base_plan_csv_path=CONFIG.get("base_plan_csv"),
+    mixed_plan_csv_path=CONFIG.get("mixed_train_plan_csv"),
+    include_base_loras=CONFIG.get("include_base_train_pairs", True),
+    include_mixed_loras=CONFIG.get("include_mixed_train_pairs", True),
 )
+print(f"[DEBUG] train dataset size = {len(train_ds)}")
 train_loader = DataLoader(
     train_ds,
     batch_size=CONFIG["batch_size"],
@@ -481,28 +579,34 @@ mixed_gallery_entries = None
 mixed_gallery_x = None
 base_lora_to_artist = {}
 artist_to_base_lora_ids = {}
-if CONFIG.get("use_mixed_rank_loss", False):
+mixed_geometry_metadata = None
+use_any_mixed_aux_loss = (
+    CONFIG.get("use_mixed_rank_loss", False)
+    or CONFIG.get("use_mix_ratio_geometry_loss", False)
+)
+if use_any_mixed_aux_loss:
     base_lora_to_artist, artist_to_base_lora_ids = load_base_artist_groups(
         CONFIG["base_plan_csv"]
     )
-    mixed_train_ds = ImageMixedRelationsDataset(
-        CONFIG["mixed_train_relations_jsonl"],
-        image_path_key=IMAGE_PATH_KEY,
-        base_lora_id_key="base_lora_id",
-        source_type_key="source_type",
-        related_mixed_ids_key="related_mixed_lora_ids",
-        base_related_mixed_ids_key="base_related_mixed_lora_ids",
-        image_root_dirs=CONFIG.get("mixed_image_root_dirs"),
-        path_replacements=CONFIG.get("image_path_replacements"),
-    )
-    mixed_train_loader = DataLoader(
-        mixed_train_ds,
-        batch_size=CONFIG["batch_size"],
-        shuffle=True,
-        num_workers=CONFIG.get("num_workers", 4),
-        pin_memory=True,
-        collate_fn=lambda batch: collate_image_mixed_relations(batch, image_preprocess=image_enc.preprocess),
-    )
+    if CONFIG.get("use_mixed_rank_loss", False):
+        mixed_train_ds = ImageMixedRelationsDataset(
+            CONFIG["mixed_train_relations_jsonl"],
+            image_path_key=IMAGE_PATH_KEY,
+            base_lora_id_key="base_lora_id",
+            source_type_key="source_type",
+            related_mixed_ids_key="related_mixed_lora_ids",
+            base_related_mixed_ids_key="base_related_mixed_lora_ids",
+            image_root_dirs=CONFIG.get("mixed_image_root_dirs"),
+            path_replacements=CONFIG.get("image_path_replacements"),
+        )
+        mixed_train_loader = DataLoader(
+            mixed_train_ds,
+            batch_size=CONFIG["batch_size"],
+            shuffle=True,
+            num_workers=CONFIG.get("num_workers", 4),
+            pin_memory=True,
+            collate_fn=lambda batch: collate_image_mixed_relations(batch, image_preprocess=image_enc.preprocess),
+        )
     base_gallery_lora_ids = sorted(base_model_matrix_dict.keys())
     mixed_gallery_lora_ids = sorted(mixed_model_matrix_dict.keys())
     mixed_gallery_entries = build_gallery_entries(base_gallery_lora_ids, mixed_gallery_lora_ids)
@@ -510,6 +614,10 @@ if CONFIG.get("use_mixed_rank_loss", False):
         [base_model_matrix_dict[lora_id] for lora_id in base_gallery_lora_ids]
         + [mixed_model_matrix_dict[lora_id] for lora_id in mixed_gallery_lora_ids],
         dim=0,
+    )
+    mixed_geometry_metadata = load_mixed_train_geometry_metadata(
+        CONFIG["mixed_train_plan_csv"],
+        mixed_gallery_lora_ids,
     )
 
 eval100_queries = None
@@ -585,40 +693,60 @@ image_proj = ProjectionHead(
 ).to(DEVICE)
 set_requires_grad(image_proj, not CONFIG.get("freeze_image_proj", False))
 
-encoder = TransformerEncoder(
-    d_model=CONFIG["dimension"],
-    num_layers=CONFIG["num_layers"],
-    num_heads=CONFIG["num_heads"],
-    d_ff=CONFIG["ff_dim"],
-    max_len=264,
-    use_pos_emb=True,
-)
+lora_encoder_mode = str(CONFIG.get("lora_encoder_mode", "full")).lower()
+if lora_encoder_mode not in {"full", "compress_only"}:
+    raise ValueError(f"Unsupported lora_encoder_mode: {lora_encoder_mode}")
+
+encoder = None
+if lora_encoder_mode == "full":
+    encoder = TransformerEncoder(
+        d_model=CONFIG["dimension"],
+        num_layers=CONFIG["num_layers"],
+        num_heads=CONFIG["num_heads"],
+        d_ff=CONFIG["ff_dim"],
+        max_len=264,
+        use_pos_emb=True,
+    )
 aggregator = TokenAggregator(
     CONFIG["dimension"],
-    hidden_dim=64,
-    use_mlp=True,
+    hidden_dim=CONFIG.get("lora_aggregator_hidden_dim", 64),
+    use_mlp=(CONFIG.get("lora_aggregator_type", "mlp").lower() == "mlp"),
 )
 
-if CONFIG.get("pretrained_lora_encoder", False):
+if (
+    CONFIG.get("pretrained_lora_encoder", False)
+    and encoder is not None
+    and CONFIG.get("lora_aggregator_type", "mlp").lower() == "mlp"
+):
     load_pretrained(encoder, CONFIG["pretrained_encoder_path"], strict=True)
     load_pretrained(aggregator, CONFIG["pretrained_aggregator_path"], strict=True)
     print("[OK] loaded pretrained LoRA encoder weights")
+elif CONFIG.get("pretrained_lora_encoder", False) and encoder is not None:
+    load_pretrained(encoder, CONFIG["pretrained_encoder_path"], strict=True)
+    print("[OK] loaded pretrained LoRA encoder weights (aggregator skipped)")
 
-encoder = encoder.to(DEVICE)
+if encoder is not None:
+    encoder = encoder.to(DEVICE)
 aggregator = aggregator.to(DEVICE)
 
 lora_enc = LoraEncoder(encoder, aggregator, normalize=True).to(DEVICE)
 set_requires_grad(lora_enc, not CONFIG.get("freeze_lora_encoder", False))
+print(f"[INFO] lora_encoder_mode = {lora_encoder_mode}")
+print(f"[INFO] lora_aggregator_type = {CONFIG.get('lora_aggregator_type', 'mlp').lower()}")
 
-lora_proj = ProjectionHead(
-    in_dim=CONFIG["dimension"],
-    out_dim=CONFIG["dimension"],
-    head_type=CONFIG.get("lora_proj_type", "linear"),
-    hidden_dim=CONFIG.get("lora_proj_hidden_dim", 512),
-    dropout=CONFIG.get("lora_proj_dropout", 0.0),
-    normalize=True,
-).to(DEVICE)
-set_requires_grad(lora_proj, not CONFIG.get("freeze_lora_proj", False))
+use_lora_proj = CONFIG.get("use_lora_proj", True)
+if use_lora_proj:
+    lora_proj = ProjectionHead(
+        in_dim=CONFIG["dimension"],
+        out_dim=CONFIG["dimension"],
+        head_type=CONFIG.get("lora_proj_type", "linear"),
+        hidden_dim=CONFIG.get("lora_proj_hidden_dim", 512),
+        dropout=CONFIG.get("lora_proj_dropout", 0.0),
+        normalize=True,
+    ).to(DEVICE)
+    set_requires_grad(lora_proj, not CONFIG.get("freeze_lora_proj", False))
+else:
+    lora_proj = nn.Identity().to(DEVICE)
 
 loss_fn = InfoNCELoss(
     temperature=CONFIG.get("infonce_temperature", 0.07),
@@ -632,6 +760,9 @@ mixed_rank_loss_fn = MixedAwareRankingLoss(
     margin=CONFIG.get("mixed_rank_loss_margin", 0.1),
     topk=CONFIG.get("mixed_rank_topk", 1),
 ).to(DEVICE)
+mix_ratio_geometry_loss_fn = MixRatioGeometryConsistencyLoss(
+    margin=CONFIG.get("mix_ratio_geometry_loss_margin", 0.0),
+).to(DEVICE)
 
 param_groups = [
     {"params": [p for p in image_enc.parameters() if p.requires_grad], "lr": CONFIG["lr"], "name": "image_enc"},
@@ -642,10 +773,12 @@ param_groups = [
 param_groups = [group for group in param_groups if group["params"]]
 optimizer = torch.optim.AdamW(param_groups, weight_decay=CONFIG["weight_decay"])
 
-wandb.config.update(
+wandb_run.config.update(
     {
         "optimizer": "AdamW",
         "train_pairs_jsonl": CONFIG["train_pairs_jsonl"],
+        "include_base_train_pairs": CONFIG.get("include_base_train_pairs", True),
+        "include_mixed_train_pairs": CONFIG.get("include_mixed_train_pairs", True),
         "category_dir": CONFIG["category_dir"],
         "eval100_pairs_jsonl": eval100_pairs_jsonl,
         "eval100_category_dir": CONFIG["eval100_category_dir"],
@@ -664,6 +797,10 @@ for epoch in range(CONFIG["epochs"]):
         CONFIG.get("use_mixed_rank_loss", False)
         and epoch >= int(CONFIG.get("mixed_rank_warmup_epochs", 0))
     )
+    mix_ratio_geometry_active = (
+        CONFIG.get("use_mix_ratio_geometry_loss", False)
+        and epoch >= int(CONFIG.get("mix_ratio_geometry_warmup_epochs", 0))
+    )
 
     image_enc.train(not CONFIG.get("freeze_image", True))
     image_proj.train(not CONFIG.get("freeze_image_proj", False))
@@ -674,12 +811,14 @@ for epoch in range(CONFIG["epochs"]):
     total_infonce_loss = 0.0
     total_rank_loss = 0.0
     total_mixed_rank_loss = 0.0
+    total_mix_ratio_geometry_loss = 0.0
     n = 0
     mixed_n = 0
     mixed_train_iter = cycle(mixed_train_loader) if mixed_train_loader is not None else None
 
-    for image_inputs, lora_x, lora_ids in train_loader:
+    for image_inputs, lora_x, lora_ids, positive_mask in train_loader:
         lora_x = lora_x.to(DEVICE, non_blocking=True)
+        positive_mask = positive_mask.to(DEVICE, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -689,9 +828,10 @@ for epoch in range(CONFIG["epochs"]):
         zl = lora_enc(lora_x)
         zl = lora_proj(zl)
 
-        infonce_loss = loss_fn(zi, zl, labels=lora_ids)
+        infonce_loss = loss_fn(zi, zl, positive_mask=positive_mask)
         rank_loss = torch.zeros((), device=DEVICE)
         mixed_rank_loss = torch.zeros((), device=DEVICE)
+        mix_ratio_geometry_loss = torch.zeros((), device=DEVICE)
         mixed_batch_size = 0
         loss = infonce_loss
         #Trueでranking lossもロスに追加
@@ -742,6 +882,41 @@ for epoch in range(CONFIG["epochs"]):
             mixed_batch_size = mixed_query_embs.size(0)
             mixed_n += mixed_batch_size
 
+        if mix_ratio_geometry_active and mixed_gallery_x is not None and mixed_geometry_metadata is not None:
+            gallery_x = mixed_gallery_x.to(DEVICE, non_blocking=True)
+            mixed_gallery_embs = lora_proj(lora_enc(gallery_x))
+            num_base_gallery = len(base_model_matrix_dict)
+            base_gallery_embs = mixed_gallery_embs[:num_base_gallery]
+            mixed_only_embs = mixed_gallery_embs[num_base_gallery:]
+            base_gallery_lora_ids = sorted(base_model_matrix_dict.keys())
+            base_index = {
+                canonicalize_lora_id(lora_id): idx
+                for idx, lora_id in enumerate(base_gallery_lora_ids)
+            }
+            target_indices = [
+                base_index[canonicalize_lora_id(lora_id)]
+                for lora_id in mixed_geometry_metadata["target_base_ids"]
+            ]
+            donor_indices = [
+                base_index[canonicalize_lora_id(lora_id)]
+                for lora_id in mixed_geometry_metadata["donor_base_ids"]
+            ]
+            z_target = base_gallery_embs[target_indices]
+            z_donor = base_gallery_embs[donor_indices]
+            alpha = torch.tensor(
+                mixed_geometry_metadata["donor_ratios"],
+                dtype=mixed_only_embs.dtype,
+                device=DEVICE,
+            )
+            mix_ratio_geometry_loss = mix_ratio_geometry_loss_fn(
+                z_mixed=mixed_only_embs,
+                z_target=z_target,
+                z_donor=z_donor,
+                alpha=alpha,
+                pair_ids=mixed_geometry_metadata["pair_ids"],
+            )
+            loss = loss + CONFIG.get("mix_ratio_geometry_loss_weight", 0.1) * mix_ratio_geometry_loss
+
         loss.backward()
 
         if CONFIG.get("grad_clip_norm", 0.0) > 0:
@@ -759,12 +934,14 @@ for epoch in range(CONFIG["epochs"]):
         total_mixed_rank_loss += mixed_rank_loss.item() * (
             mixed_batch_size if mixed_batch_size > 0 else batch_size
         )
+        total_mix_ratio_geometry_loss += mix_ratio_geometry_loss.item() * batch_size
         n += batch_size
 
     avg_loss = total_loss / max(n, 1)
     avg_infonce_loss = total_infonce_loss / max(n, 1)
     avg_rank_loss = total_rank_loss / max(n, 1)
     avg_mixed_rank_loss = total_mixed_rank_loss / max(mixed_n, 1)
+    avg_mix_ratio_geometry_loss = total_mix_ratio_geometry_loss / max(n, 1)
     epoch_time_sec = time.perf_counter() - epoch_start_time
     train_samples_per_sec = n / max(epoch_time_sec, 1e-8)
 
@@ -774,7 +951,9 @@ for epoch in range(CONFIG["epochs"]):
         "train_infonce_loss": avg_infonce_loss,
         "train_rank_loss": avg_rank_loss,
         "train_mixed_rank_loss": avg_mixed_rank_loss,
+        "train_mix_ratio_geometry_loss": avg_mix_ratio_geometry_loss,
         "mixed_rank_active": int(mixed_rank_active),
+        "mix_ratio_geometry_active": int(mix_ratio_geometry_active),
         "epoch_time_sec": epoch_time_sec,
         "train_samples_per_sec": train_samples_per_sec,
     }
@@ -783,7 +962,8 @@ for epoch in range(CONFIG["epochs"]):
 
     log_dict["grad_norm/image_proj"] = grad_norm(image_proj)
     log_dict["grad_norm/lora_enc"] = grad_norm(lora_enc)
-    log_dict["grad_norm/lora_proj"] = grad_norm(lora_proj)
+    if use_lora_proj:
+        log_dict["grad_norm/lora_proj"] = grad_norm(lora_proj)
 
     run_eval = (
         CONFIG.get("validation_eval_every", 1) > 0
@@ -836,7 +1016,7 @@ for epoch in range(CONFIG["epochs"]):
             if mixed_eval_metrics is not None:
                 log_dict.update(mixed_eval_metrics)
 
-    wandb.log(log_dict)
+    wandb_run.log(log_dict)
 
     is_best = avg_loss < best_train_loss
     if is_best:
@@ -851,6 +1031,10 @@ for epoch in range(CONFIG["epochs"]):
         image_proj=image_proj,
         lora_enc=lora_enc,
         lora_proj=lora_proj,
+        save_lora_proj=use_lora_proj,
+        lora_encoder_mode=lora_encoder_mode,
+        lora_aggregator_type=str(CONFIG.get("lora_aggregator_type", "mlp")).lower(),
+        model_config_snapshot={key: CONFIG[key] for key in MODEL_CONFIG_KEYS if key in CONFIG},
     )
 
     message = (
@@ -858,6 +1042,7 @@ for epoch in range(CONFIG["epochs"]):
         f"train_loss={avg_loss:.6f} "
         f"best={best_train_loss:.6f} "
         f"mixed_rank_active={int(mixed_rank_active)} "
+        f"mix_ratio_geometry_active={int(mix_ratio_geometry_active)} "
         f"time={epoch_time_sec:.1f}s "
         f"throughput={train_samples_per_sec:.1f}/s"
     )
@@ -878,4 +1063,4 @@ for epoch in range(CONFIG["epochs"]):
         message += " " + " ".join(metric_parts)
     print(message)
 
-wandb.finish()
+wandb_run.finish()

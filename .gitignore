@@ -1,28 +1,27 @@
-# Python cache
+# Ignore everything in this directory by default.
+/*
+
+# Keep this ignore file itself.
+!/.gitignore
+
+# Keep the top-level files you want to track.
+!/README.md
+!/main_train.py
+!/config.py
+
+# Keep the directories you want to track.
+!/dataset/
+!/model/
+!/train/
+!/utils/
+
+# Keep everything inside those directories.
+!/dataset/**
+!/model/**
+!/train/**
+!/utils/**
+
+# Still ignore common Python and Jupyter cache files anywhere.
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-
-# Training artifacts
-checkpoints/
-saved_models/
-wandb/
-
-# Dataset
-dataset/
-generated_sd15_clip_baseline/
-generated_sd15_clip_baseline_collisioncheck/
-generated_sd15_clip_baseline_timing10/
-
-# Evaluation notebooks
-evaluate_image_lora_retrieval.ipynb
-evaluate_mixed_lora_detection.ipynb
-evaluate_mixed_lora_detection_two_patterns.ipynb
-evaluate_image_lora_retrieval_two_patterns.ipynb
-evaluate_clip_generated_image_baseline.ipynb
-
-# md
-侵害LoRA検出検出研究の概要.md
-
-# python
-analyze_mixed_lora_hypothesis.py
