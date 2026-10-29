@@ -171,6 +171,37 @@ def _paired_permutation_pvalue(
     return float((np.count_nonzero(sampled >= observed) + 1) / (num_resamples + 1))
 
 
+def _infer_cluster_col(join_cols: Iterable[str], available_cols: Iterable[str]) -> str | None:
+    available_set = set(available_cols)
+    for candidate in ("artist", "target_artist"):
+        if candidate in available_set:
+            return candidate
+    for col in join_cols:
+        if col in available_set and "artist" in col.lower():
+            return col
+    return None
+
+
+def _aggregate_paired_metrics_by_cluster(
+    merged: pd.DataFrame,
+    cluster_col: str,
+    metric_name: str,
+    left_name: str,
+    right_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    left_col = f"{metric_name}_{left_name}"
+    right_col = f"{metric_name}_{right_name}"
+    cluster_means = (
+        merged.groupby(cluster_col, sort=True)[[left_col, right_col]]
+        .mean()
+        .reset_index(drop=True)
+    )
+    return (
+        cluster_means[left_col].to_numpy(dtype=float),
+        cluster_means[right_col].to_numpy(dtype=float),
+    )
+
+
 def paired_permutation_pvalue(
     left_values: Iterable[float],
     right_values: Iterable[float],
@@ -253,6 +284,7 @@ def compare_paired_details(
     right_name: str = "right",
     num_resamples: int = 20000,
     seed: int = 0,
+    cluster_col: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     join_cols = list(join_cols)
     merged = left_df.merge(
@@ -264,12 +296,30 @@ def compare_paired_details(
     if len(merged) == 0:
         raise ValueError(f"No overlapping rows after merge on {join_cols}")
 
+    effective_cluster_col = cluster_col or _infer_cluster_col(join_cols, merged.columns)
+    inference_unit = "query"
+    num_clusters = math.nan
+    if effective_cluster_col is not None:
+        inference_unit = effective_cluster_col
+        num_clusters = int(merged[effective_cluster_col].nunique())
+
     results: list[dict[str, object]] = []
 
     reciprocal_left = merged[f"reciprocal_rank_{left_name}"].to_numpy(dtype=float)
     reciprocal_right = merged[f"reciprocal_rank_{right_name}"].to_numpy(dtype=float)
     reciprocal_diff = reciprocal_right - reciprocal_left
     rr_lo, rr_hi = _paired_bootstrap_ci(reciprocal_diff, num_bootstrap=5000, seed=seed)
+    if effective_cluster_col is not None:
+        reciprocal_left_test, reciprocal_right_test = _aggregate_paired_metrics_by_cluster(
+            merged=merged,
+            cluster_col=effective_cluster_col,
+            metric_name="reciprocal_rank",
+            left_name=left_name,
+            right_name=right_name,
+        )
+        reciprocal_test_diff = reciprocal_right_test - reciprocal_left_test
+    else:
+        reciprocal_test_diff = reciprocal_diff
     results.append(
         {
             "metric": "mrr",
@@ -279,8 +329,11 @@ def compare_paired_details(
             "delta_right_minus_left": float(reciprocal_diff.mean()),
             "ci95_low": rr_lo,
             "ci95_high": rr_hi,
-            "p_value": _paired_permutation_pvalue(reciprocal_diff, num_resamples=num_resamples, seed=seed),
-            "n": int(len(merged)),
+            "p_value": _paired_permutation_pvalue(reciprocal_test_diff, num_resamples=num_resamples, seed=seed),
+            "n": int(num_clusters if effective_cluster_col is not None else len(merged)),
+            "num_queries": int(len(merged)),
+            "num_clusters": num_clusters,
+            "inference_unit": inference_unit,
         }
     )
 
@@ -288,6 +341,17 @@ def compare_paired_details(
     rank_right = merged[f"rank_{right_name}"].to_numpy(dtype=float)
     rank_diff = rank_right - rank_left
     rank_lo, rank_hi = _paired_bootstrap_ci(rank_diff, num_bootstrap=5000, seed=seed)
+    if effective_cluster_col is not None:
+        rank_left_test, rank_right_test = _aggregate_paired_metrics_by_cluster(
+            merged=merged,
+            cluster_col=effective_cluster_col,
+            metric_name="rank",
+            left_name=left_name,
+            right_name=right_name,
+        )
+        rank_test_diff = rank_right_test - rank_left_test
+    else:
+        rank_test_diff = rank_diff
     results.append(
         {
             "metric": "mean_rank",
@@ -297,8 +361,11 @@ def compare_paired_details(
             "delta_right_minus_left": float(rank_diff.mean()),
             "ci95_low": rank_lo,
             "ci95_high": rank_hi,
-            "p_value": _paired_permutation_pvalue(rank_diff, num_resamples=num_resamples, seed=seed),
-            "n": int(len(merged)),
+            "p_value": _paired_permutation_pvalue(rank_test_diff, num_resamples=num_resamples, seed=seed),
+            "n": int(num_clusters if effective_cluster_col is not None else len(merged)),
+            "num_queries": int(len(merged)),
+            "num_clusters": num_clusters,
+            "inference_unit": inference_unit,
         }
     )
 
@@ -312,6 +379,19 @@ def compare_paired_details(
             right_values = merged[right_col].to_numpy(dtype=float)
             diffs = right_values - left_values
             ci_lo, ci_hi = _paired_bootstrap_ci(diffs, num_bootstrap=5000, seed=seed)
+            if effective_cluster_col is not None:
+                left_test_values, right_test_values = _aggregate_paired_metrics_by_cluster(
+                    merged=merged,
+                    cluster_col=effective_cluster_col,
+                    metric_name=metric_name,
+                    left_name=left_name,
+                    right_name=right_name,
+                )
+                test_diffs = right_test_values - left_test_values
+            else:
+                left_test_values = left_values
+                right_test_values = right_values
+                test_diffs = diffs
             row = {
                 "metric": metric_name,
                 left_name: float(left_values.mean()),
@@ -319,9 +399,12 @@ def compare_paired_details(
                 "delta_right_minus_left": float(diffs.mean()),
                 "ci95_low": ci_lo,
                 "ci95_high": ci_hi,
-                "n": int(len(merged)),
+                "n": int(num_clusters if effective_cluster_col is not None else len(merged)),
+                "num_queries": int(len(merged)),
+                "num_clusters": num_clusters,
+                "inference_unit": inference_unit,
             }
-            if metric_name.startswith("hit@"):
+            if metric_name.startswith("hit@") and effective_cluster_col is None:
                 p_value, left_only, right_only = mcnemar_exact_pvalue(left_values > 0.5, right_values > 0.5)
                 row.update(
                     {
@@ -335,7 +418,7 @@ def compare_paired_details(
                 row.update(
                     {
                         "test": "paired_permutation",
-                        "p_value": _paired_permutation_pvalue(diffs, num_resamples=num_resamples, seed=seed),
+                        "p_value": _paired_permutation_pvalue(test_diffs, num_resamples=num_resamples, seed=seed),
                     }
                 )
             results.append(row)
@@ -354,6 +437,7 @@ def compare_saved_csvs(
     right_rank_col: str | None = None,
     num_resamples: int = 20000,
     seed: int = 0,
+    cluster_col: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     left_df = load_saved_details(left_csv, rank_col=left_rank_col)
     right_df = load_saved_details(right_csv, rank_col=right_rank_col)
@@ -366,4 +450,5 @@ def compare_saved_csvs(
         right_name=right_name,
         num_resamples=num_resamples,
         seed=seed,
+        cluster_col=cluster_col,
     )

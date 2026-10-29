@@ -1,29 +1,29 @@
-# Retrieving LoRAs Trained on a Query Image via Internal LoRA Parameters
+# Which LoRA Was Trained on My Image? Retrieving Candidate LoRAs from Internal Weights
 
 This repository implements a framework for learning embedding representations of LoRA models directly from their adapter weights, without relying on textual metadata. 
 The learned representations are aligned with image features so that each LoRA can be retrieved from example images and analyzed in a shared embedding space.
 
 The current codebase supports training with image-LoRA pairs, evaluation on base-LoRA retrieval, and mixed-LoRA relation learning.
 
-<!-- ## Publication
+## Publication
 
-This work has been accepted to ICMR 2026:
+This paper has been accepted as a full paper at the International Conference on Multimedia Modeling (MMM 2027).
 
-Kanada, Yuro, Yuma Oe, Huu-Long Pham, Makoto P. Kato, Hiroaki Ohshima, Sumio Fujita, and Yoshiyuki Shoji. "Retrieval of LoRA Models based on Layer-Wise Weight Embedding without Metadata." In *Proceedings of the 16th ACM International Conference on Multimedia Retrieval (ICMR 2026)*, to appear, 2026. -->
+Yuro Kanada and Yoshiyuki Shoji. "Which LoRA Was Trained on My Image? Retrieving Candidate LoRAs from Internal Weights." In *Proceedings of the International Conference on Multimedia Modeling (MMM 2027)*, to appear, 2027.
 
-<!-- ## Citation
+## Citation
 
 If you use this repository or the encoder in your research, please cite:
 
 ```bibtex
-@inproceedings{kanada2026retrieval,
-  title = {Retrieval of LoRA Models based on Layer-Wise Weight Embedding without Metadata},
-  author = {Kanada, Yuro and Oe, Yuma and Pham, Huu-Long and Kato, Makoto P. and Ohshima, Hiroaki and Fujita, Sumio and Shoji, Yoshiyuki},
-  booktitle = {Proceedings of the 16th ACM International Conference on Multimedia Retrieval},
-  year = {2026},
+@inproceedings{kanada2027which,
+  title = {Which {LoRA} Was Trained on My Image? Retrieving Candidate {LoRA}s from Internal Weights},
+  author = {Kanada, Yuro and Shoji, Yoshiyuki},
+  booktitle = {Proceedings of the International Conference on Multimedia Modeling},
+  year = {2027},
   note = {To appear}
 }
-``` -->
+```
 
 ## Repository Structure
 
@@ -59,6 +59,38 @@ Set the dataset paths and output paths in [`config.py`](/home/kanada/my-jupyterl
 
 ```bash
 python3 main_train.py
+```
+
+## Generation-Based Retrieval Baseline (GBR)
+
+Generation-Based Retrieval (GBR) is a comparison method used in the paper, not
+the proposed internal-weight retrieval method. For each candidate LoRA, GBR
+generates ten images with Stable Diffusion 1.5, extracts their image features,
+and averages the features to construct the LoRA's retrieval representation.
+Candidate LoRAs are then ranked according to the similarity between this
+representation and the query image feature. The generation code is provided in
+`generate_sd15_clip_baseline_images.py`.
+
+Some code and saved evaluation artifacts use `GBL` or `gbl` as a legacy
+internal label. These names refer to the same GBR comparison method.
+
+The following prompts were used for every LoRA:
+
+1. `a portrait of a person, detailed painting`
+2. `a landscape with mountains and trees, detailed painting`
+3. `a city street at night, detailed painting`
+4. `a still life with flowers and objects, detailed painting`
+5. `an interior room with a window, detailed painting`
+6. `a seascape with boats and waves, detailed painting`
+7. `a garden with blooming flowers, detailed painting`
+8. `a village street with small houses, detailed painting`
+9. `a person sitting at a table, detailed painting`
+10. `a forest path with sunlight, detailed painting`
+
+The negative prompt was:
+
+```text
+worst quality, low quality, blurry, distorted, deformed, bad anatomy, extra fingers, watermark, text, signature
 ```
 
 ## Notes
