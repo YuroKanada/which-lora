@@ -1,4 +1,4 @@
-# Which LoRA Was Trained on My Image? Retrieving Candidate LoRAs from Internal Weights
+# Which LoRA Was Trained on My Image? <br>Retrieving Candidate LoRAs from Internal Weights<\br>
 
 This repository implements a framework for learning embedding representations of LoRA models directly from their adapter weights, without relying on textual metadata. 
 The learned representations are aligned with image features so that each LoRA can be retrieved from example images and analyzed in a shared embedding space.
